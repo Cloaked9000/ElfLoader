@@ -21,7 +21,7 @@ There are multiple steps, and it's a little complex, but to sum it up:
 
 ## Building
 The Loader must first be built using NASM, and the loader header file generated, this can be done using the following command whilst in the loader directory:
-```
+```sh
 nasm -fbin loader.asm && xxd -i loader > loader.h
 ```
 CMake can then be used to build  the rest of the loader.
