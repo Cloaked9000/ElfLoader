@@ -30,4 +30,5 @@ CMake can then be used to build  the rest of the loader.
 At the time of writing this, the project is only 2 days old. So there's a lot of work to be done. Currently, the following major limitations stand, that I can think of from the top of my head at least:
 1. No support for 32bit binaries.
 2. No support for dynamic linking.
-3. I have no clue how portable this is, or how well it'll work for complex programs.
+3. Section flag permissions aren't obeyed. Everything is allocated using ```PROT_WRITE | PROT_EXEC``` which is not secure.
+4. I have no clue how portable this is, or how well it'll work for complex programs.
