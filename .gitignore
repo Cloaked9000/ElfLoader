@@ -1,0 +1,8 @@
+
+\.idea/
+
+cmake-build-debug/
+
+loader/loader\.h
+
+loader/loader
