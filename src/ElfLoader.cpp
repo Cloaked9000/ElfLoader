@@ -25,11 +25,34 @@ uint64_t round_down(uint64_t number, uint64_t multiple)
     return round_up(number, multiple) - multiple;
 }
 
-struct SectionEntry
+struct ElfMetadata
 {
-    uint64_t addr;
-    uint64_t len;
-} __attribute__((packed));
+    ElfMetadata(const Elf &elf)
+    {
+        auto header_count = (uint64_t)std::count_if(elf.program_headers.begin(), elf.program_headers.end(), [](const auto &obj){return obj.type == ElfProgramHeader::Type::load;});
+        alloc_info.append((char*)&header_count, sizeof(header_count));
+        for(auto &header : elf.program_headers)
+        {
+            if(header.type != ElfProgramHeader::Type::load)
+                continue;
+            uint64_t rounded_mem_offset = round_down(header.mem_offset, static_cast<uint64_t>(getpagesize()));
+            alloc_info.append((char*)&rounded_mem_offset, sizeof(rounded_mem_offset));
+            alloc_info.append((char*)&header.mem_size, sizeof(header.mem_size));
+        }
+    }
+
+    inline const char *data() const
+    {
+        return alloc_info.data();
+    }
+
+    inline size_t size() const
+    {
+        return alloc_info.size();
+    }
+
+    std::string alloc_info;
+};
 
 typedef uint64_t (*LoaderFunc)(uint64_t free_begin_p1, uint64_t free_len_p1, uint64_t free_begin_p2, uint64_t free_len_p2, void *alloc_list_addr, uint64_t entry_point);
 bool ElfLoader::exec(const Elf &elf, int argc, char *argv[])
@@ -47,36 +70,22 @@ bool ElfLoader::exec(const Elf &elf, int argc, char *argv[])
             strncpy(argv[0], elf.name.data(), name_len);
         }
 
-        //Figure out which memory addresses we need to allocate for the new ELF
-        auto section_count = (uint64_t)std::count_if(elf.program_headers.begin(), elf.program_headers.end(), [](const ElfProgramHeader &header){
-            return header.type == ElfProgramHeader::Type::load;
-        });
+        //Prepare elf metadata to pass to loader
+        ElfMetadata alloc_info(elf);
 
         //Allocate memory for the loader
         auto page_size = static_cast<uint64_t>(getpagesize());
-        auto *loader_addr = (uint8_t*)mmap(nullptr, loader_len + (sizeof(SectionEntry) * section_count) + sizeof(uint64_t),  PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        auto *loader_addr = (uint8_t*)mmap(nullptr, loader_len + alloc_info.size(),  PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if(loader_addr == MAP_FAILED)
             return EXIT_FAILURE;
 
         //Write the loader binary
         memcpy(loader_addr, loader, loader_len);
 
-        //Fill in AllocList with however many sections need allocated
-        memcpy(loader_addr + loader_len, &section_count, sizeof(section_count));
-        auto *alloc_list = (SectionEntry*)(loader_addr + loader_len + sizeof(uint64_t));
-        size_t current_section = 0;
-        std::cout << "Loadable ELF sections: " << section_count << std::endl;
-        for(auto &section : elf.program_headers)
-        {
-            if(section.type != ElfProgramHeader::Type::load)
-                continue;
-            std::cout << "Will write loadable section: " << section.mem_offset << ". Length: " << section.mem_size << std::endl;
-            alloc_list[current_section].addr = round_down(section.mem_offset, page_size);
-            alloc_list[current_section].len = section.mem_size;
-            ++current_section;
-        }
+        //Write alloc metadata
+        memcpy(loader_addr + loader_len, alloc_info.data(), alloc_info.size());
 
-        //Get process memory allocations so we know where we can free up to
+        //Get process memory allocations so we know where we can free up to (only free up until the stack, no more)
         std::vector<Alloc> allocations = get_process_allocations(getpid());
         uintptr_t stack_addr = std::find_if(allocations.begin(), allocations.end(), [](const Alloc &alloc) {
             return alloc.type == Alloc::Type::stack;
