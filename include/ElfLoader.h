@@ -22,7 +22,7 @@ public:
      * @param env Environmental variables for the child. Each element should be formated as so: "Name=Value"
      * @return True on success, false on failure
      */
-    bool exec(const Elf &elf, int argc = 0, char *argv[] = nullptr);
+    bool exec(Elf elf, int argc = 0, char *argv[] = nullptr);
 
 
 private:
@@ -49,6 +49,8 @@ private:
      * @return A list of allocations on success
      */
     std::vector<Alloc> get_process_allocations(int pid);
+
+    void write_to_pid(int pid, void *src_addr, size_t src_len, void *dest_addr, size_t dest_len);
 };
 
 

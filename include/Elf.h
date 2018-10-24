@@ -8,12 +8,14 @@
 #include <vector>
 #include "ElfHeader.h"
 #include "ElfProgramHeader.h"
+#include "ElfSectionHeader.h"
 
 class Elf
 {
 public:
     ElfHeader header;
     std::vector<ElfProgramHeader> program_headers;
+    std::vector<ElfSectionHeader> section_headers;
     std::string binary_data;
     std::string name;
 };

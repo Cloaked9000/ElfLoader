@@ -7,6 +7,7 @@
 #include <fstream>
 #include "ElfHeader.h"
 #include "Elf.h"
+#include "ElfSectionHeader.h"
 
 class ElfParser
 {
@@ -23,9 +24,9 @@ public:
 
 private:
 
-    ElfProgramHeader parse_program_header32(std::ifstream &elf_stream);
-
     ElfProgramHeader parse_program_header64(std::ifstream &elf_stream);
+
+    ElfSectionHeader parse_section_header64(std::ifstream &elf_stream);
 };
 
 

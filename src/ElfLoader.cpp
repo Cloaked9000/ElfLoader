@@ -27,18 +27,30 @@ uint64_t round_down(uint64_t number, uint64_t multiple)
 
 struct ElfMetadata
 {
-    ElfMetadata(const Elf &elf)
+    ElfMetadata(Elf &elf)
     {
-        auto header_count = (uint64_t)std::count_if(elf.program_headers.begin(), elf.program_headers.end(), [](const auto &obj){return obj.type == ElfProgramHeader::Type::load;});
-        alloc_info.append((char*)&header_count, sizeof(header_count));
+        struct Alloc
+        {
+            Alloc(uint64_t mem_offset_, uint64_t mem_size_)
+                    : mem_offset(mem_offset_),
+                      mem_size(mem_size_){}
+            uint64_t mem_offset;
+            uint64_t mem_size;
+        };
+
+        //Store allocation information for loadable program headers
+        std::vector<Alloc> alloc;
         for(auto &header : elf.program_headers)
         {
             if(header.type != ElfProgramHeader::Type::load)
                 continue;
-            uint64_t rounded_mem_offset = round_down(header.mem_offset, static_cast<uint64_t>(getpagesize()));
-            alloc_info.append((char*)&rounded_mem_offset, sizeof(rounded_mem_offset));
-            alloc_info.append((char*)&header.mem_size, sizeof(header.mem_size));
+            alloc.emplace_back(round_down(header.mem_offset, (size_t)getpagesize()), header.mem_size);
         }
+
+        //Prepare info into a format that the Loader expects
+        uint64_t alloc_count = alloc.size();
+        alloc_info.append((char*)&alloc_count, sizeof(alloc_count));
+        alloc_info.append((char*)alloc.data(), alloc.size() * sizeof(Alloc));
     }
 
     inline const char *data() const
@@ -55,7 +67,7 @@ struct ElfMetadata
 };
 
 typedef uint64_t (*LoaderFunc)(uint64_t free_begin_p1, uint64_t free_len_p1, uint64_t free_begin_p2, uint64_t free_len_p2, void *alloc_list_addr, uint64_t entry_point);
-bool ElfLoader::exec(const Elf &elf, int argc, char *argv[])
+bool ElfLoader::exec(Elf elf, int argc, char *argv[])
 {
     //Fork, creating a new process
     int pid = fork();
@@ -112,7 +124,7 @@ bool ElfLoader::exec(const Elf &elf, int argc, char *argv[])
         return false;
     }
 
-    //Child is now ready to have new code written into it, write the sections
+    //Child is now ready to have new code written into it, write the program headers
     std::cout << "Child suspended. Writing new sections..." << std::endl;
     for(auto &section : elf.program_headers)
     {
@@ -120,17 +132,8 @@ bool ElfLoader::exec(const Elf &elf, int argc, char *argv[])
         if(section.type != ElfProgramHeader::Type::load)
             continue;
 
-        //Prepare to write to the child
-        iovec local_vec{};
-        iovec remote_vec{};
-        local_vec.iov_len = section.file_size;
-        local_vec.iov_base = (void*)&elf.binary_data[section.file_offset];
-        remote_vec.iov_base = (void*)section.mem_offset;
-        remote_vec.iov_len = section.file_size;
-
-        //Make the write
-        ssize_t write_ret = process_vm_writev(pid, &local_vec, 1, &remote_vec, 1, 0);
-        std::cout << "Write section " << section.mem_offset << ": " << write_ret << std::endl;
+        write_to_pid(pid, &elf.binary_data[section.file_offset], section.file_size, (void*)section.mem_offset, section.file_size);
+        std::cout << "Write program header " << section.mem_offset << ": " << section.file_size << std::endl;
     }
 
     //Sections are now written, resume the child
@@ -192,4 +195,18 @@ std::vector<ElfLoader::Alloc> ElfLoader::get_process_allocations(int pid)
     }
 
     return allocations;
+}
+
+void ElfLoader::write_to_pid(int pid, void *src_addr, size_t src_len, void *dest_addr, size_t dest_len)
+{
+    iovec local_vec{};
+    iovec remote_vec{};
+    local_vec.iov_base = src_addr;
+    local_vec.iov_len = src_len;
+    remote_vec.iov_base = dest_addr;
+    remote_vec.iov_len = dest_len;
+    if(process_vm_writev(pid, &local_vec, 1, &remote_vec, 1, 0) != local_vec.iov_len)
+    {
+        throw std::runtime_error("Failed to make remote write. Errno: " + std::to_string(errno));
+    }
 }
