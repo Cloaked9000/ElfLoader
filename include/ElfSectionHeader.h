@@ -55,8 +55,8 @@ public:
     std::string name;
     Type type;
     uint64_t flags;
-    uintptr_t mem_offset;
-    uintptr_t file_offset;
+    uint64_t mem_offset;
+    uint64_t file_offset;
     uint64_t file_size;
     uint32_t link;
     uint32_t info;

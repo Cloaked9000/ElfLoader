@@ -1,17 +1,9 @@
 #include <iostream>
 #include <fstream>
 #include <ElfParser.h>
-#include <sys/mman.h>
-#include <cstring>
-#include <zconf.h>
-#include <sys/syscall.h>
-#include <signal.h>
-#include <chrono>
-#include <thread>
-#include <sys/types.h>
 #include <ElfLoader.h>
 
-int main(int argc, char *argv[])
+int main(int argc, char *argv[], char *envp[])
 {
     //Load ELF file
     std::string filepath = "hello";
@@ -25,7 +17,6 @@ int main(int argc, char *argv[])
 
     //Execute it
     ElfLoader loader;
-    loader.exec(binary, argc, argv);
-
+    loader.exec(binary, argc, argv, envp);
     return 0;
 }

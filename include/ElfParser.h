@@ -25,7 +25,6 @@ public:
 private:
 
     ElfProgramHeader parse_program_header64(std::ifstream &elf_stream);
-
     ElfSectionHeader parse_section_header64(std::ifstream &elf_stream);
 };
 

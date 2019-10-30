@@ -19,10 +19,10 @@ public:
      * @param elf The parsed ELF file
      * @param argc argc value. Number of elements in argv. But you know that. May be 0.
      * @param argv argv value. This should be the one passed to your main, so the child can be renamed. May be nullptr.
-     * @param env Environmental variables for the child. Each element should be formated as so: "Name=Value"
+     * @param envp Environmental variables for the child.
      * @return True on success, false on failure
      */
-    bool exec(Elf elf, int argc = 0, char *argv[] = nullptr);
+    bool exec(Elf elf, int argc = 0, char *argv[] = nullptr, char *envp[] = nullptr);
 
 
 private:
@@ -34,6 +34,7 @@ private:
             vdso,
             vsyscall,
             stack,
+            heap,
             other
         };
         uintptr_t addr;

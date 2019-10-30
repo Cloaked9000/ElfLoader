@@ -41,7 +41,6 @@ Elf ElfParser::parse(std::ifstream &elf_stream, std::string elf_name)
     elf_stream.read((char*)&header.section_header_table_entry_size, sizeof(header.section_header_table_entry_size));
     elf_stream.read((char*)&header.section_header_table_entry_count, sizeof(header.section_header_table_entry_count));
     elf_stream.read((char*)&header.section_header_name_index, sizeof(header.section_header_name_index));
-    std::cout << "Sections: " << header.section_header_table_entry_count << std::endl;
 
     //Ensure that endianness is the same as ours
     if(htonl(47) == 47)
@@ -93,20 +92,21 @@ Elf ElfParser::parse(std::ifstream &elf_stream, std::string elf_name)
     elf_stream.read(elf.binary_data.data(), elf.binary_data.size());
 
     //Read section header names from strtab section if it exists
-    auto strtab = std::find_if(elf.section_headers.begin(), elf.section_headers.end(), [](const ElfSectionHeader &header) {
-        return header.type == ElfSectionHeader::Type::strtab;
-    });
-    if(strtab != elf.section_headers.end())
+    //We have a strtab section, so fill in names
+    ElfSectionHeader *shstrtab = nullptr;
+    if(elf.header.section_header_name_index < elf.section_headers.size())
     {
-        //We have a strtab section, so fill in names
         for(auto &section : elf.section_headers)
         {
             if(section.type == ElfSectionHeader::Type::null)
                 continue;
-            section.name.append(&elf.binary_data.at(strtab->file_offset + section.name_strtab_offset));
-            std::cout << "Section: " << section.name << std::endl;
+            auto &strtab = elf.section_headers[elf.header.section_header_name_index];
+            section.name.append(&elf.binary_data.at(strtab.file_offset + section.name_strtab_offset));
         }
-
+    }
+    else
+    {
+        std::cout << "Invalid section name index found in header. Not filling in section names." << std::endl;
     }
 
     return elf;

@@ -14,7 +14,15 @@ public:
         null = 0,
         load = 1,
         dynamic = 2,
-        interpreted = 4,
+        interpreted = 3,
+        note = 4,
+        shlib = 5,
+        phdr = 6,
+        tls = 7,
+        loos = 0x60000000,
+        hios = 0x6fffffff,
+        loproc = 0x70000000,
+        hiproc = 0x7fffffff,
     };
 
     enum Flags : uint32_t
@@ -23,6 +31,11 @@ public:
         writeable = 2,
         readable = 4
     };
+
+    ElfProgramHeader()= default;
+    ElfProgramHeader(Type type, uint32_t flags, uint64_t fileOffset, uint64_t memOffset, uint64_t fileSize, uint64_t memSize, uint64_t alignment)
+    : type(type), flags(flags), file_offset(fileOffset), mem_offset(memOffset), file_size(fileSize), mem_size(memSize), alignment(alignment)
+    {}
 
     Type type;
     uint32_t flags;

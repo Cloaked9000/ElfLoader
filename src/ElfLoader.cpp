@@ -13,6 +13,7 @@
 #include <fstream>
 #include <algorithm>
 #include <sys/uio.h>
+#include <elf.h>
 #include "../loader/loader.h"
 
 uint64_t round_up(uint64_t number, uint64_t multiple)
@@ -25,49 +26,60 @@ uint64_t round_down(uint64_t number, uint64_t multiple)
     return round_up(number, multiple) - multiple;
 }
 
-struct ElfMetadata
+template<typename T>
+inline bool contains(T range_begin, T range_end, T point)
 {
-    ElfMetadata(Elf &elf)
-    {
-        struct Alloc
-        {
-            Alloc(uint64_t mem_offset_, uint64_t mem_size_)
-                    : mem_offset(mem_offset_),
-                      mem_size(mem_size_){}
-            uint64_t mem_offset;
-            uint64_t mem_size;
-        };
+    return point >= range_begin && point < range_end;
+}
 
-        //Store allocation information for loadable program headers
-        std::vector<Alloc> alloc;
-        for(auto &header : elf.program_headers)
+class AllocationBuilder
+{
+public:
+    enum class Type : uint64_t
+    {
+        Alloc = 0,
+        Dealloc = 1,
+    };
+
+    struct Alloc
+    {
+        Alloc(Type type, uintptr_t addr, uintptr_t len) : type(type), addr(addr), len(len)
+        {}
+
+        [[nodiscard]] static constexpr auto size()
         {
-            if(header.type != ElfProgramHeader::Type::load)
-                continue;
-            alloc.emplace_back(round_down(header.mem_offset, (size_t)getpagesize()), header.mem_size);
+            return sizeof(type) + sizeof(addr) + sizeof(len);
         }
 
-        //Prepare info into a format that the Loader expects
-        uint64_t alloc_count = alloc.size();
-        alloc_info.append((char*)&alloc_count, sizeof(alloc_count));
-        alloc_info.append((char*)alloc.data(), alloc.size() * sizeof(Alloc));
-    }
+        Type type;
+        uintptr_t addr;
+        uintptr_t len;
+    };
 
-    inline const char *data() const
+    template<typename ...Args>
+    void add(Args &&...args)
     {
-        return alloc_info.data();
+        allocations.emplace_back(std::forward<Args>(args)...);
     }
 
-    inline size_t size() const
+    std::string build()
     {
-        return alloc_info.size();
+        const uint64_t len = allocations.size();
+        std::string str((char*)&len, sizeof(len));
+        for(const auto &alloc : allocations)
+        {
+            str.append((char*)&alloc.type, sizeof(alloc.type));
+            str.append((char*)&alloc.addr, sizeof(alloc.addr));
+            str.append((char*)&alloc.len, sizeof(alloc.len));
+        }
+        return str;
     }
 
-    std::string alloc_info;
+    std::vector<Alloc> allocations;
 };
 
-typedef uint64_t (*LoaderFunc)(uint64_t free_begin_p1, uint64_t free_len_p1, uint64_t free_begin_p2, uint64_t free_len_p2, void *alloc_list_addr, uint64_t entry_point);
-bool ElfLoader::exec(Elf elf, int argc, char *argv[])
+typedef uint64_t (*LoaderFunc)(void *alloc_list_addr, uint64_t entry_point, uint64_t stack_end, uint64_t argc);
+bool ElfLoader::exec(Elf elf, int argc, char *argv[], char *envp[])
 {
     //Fork, creating a new process
     int pid = fork();
@@ -82,35 +94,71 @@ bool ElfLoader::exec(Elf elf, int argc, char *argv[])
             strncpy(argv[0], elf.name.data(), name_len);
         }
 
-        //Prepare elf metadata to pass to loader
-        ElfMetadata alloc_info(elf);
+        //Figure out which sections of memory need to be allocated/de-allocated.
+        //To do this, first enumerate our own address space to figure out what needs to be free'd in the new process.
+        AllocationBuilder alloc_builder;
 
-        //Allocate memory for the loader
-        auto page_size = static_cast<uint64_t>(getpagesize());
-        auto *loader_addr = (uint8_t*)mmap(nullptr, loader_len + alloc_info.size(),  PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+        std::vector<Alloc> addr_space = get_process_allocations(getpid());
+        for(const auto &alloc : addr_space)
+        {
+            if(alloc.type == Alloc::Type::other)
+            {
+                std::cout << "Dealloc: " << std::hex << "0x" << alloc.addr << ", " << std::dec << alloc.len << std::endl;
+                alloc_builder.add(AllocationBuilder::Type::Dealloc, alloc.addr, alloc.len);
+            }
+        }
+
+        //Now we need to figure out what needs to be allocated in the new process
+        for(const auto &alloc : elf.program_headers)
+        {
+            if(alloc.type == ElfProgramHeader::Type::load || alloc.type == ElfProgramHeader::Type::tls)
+            {
+                std::cout << "Alloc: " << std::hex << "0x" << round_down(alloc.mem_offset, (size_t)getpagesize()) << ", " << std::dec << alloc.mem_size << std::endl;
+                alloc_builder.add(AllocationBuilder::Type::Alloc, round_down(alloc.mem_offset, (size_t)getpagesize()), alloc.mem_size);
+            }
+        }
+
+//        std::vector<Elf64_auxv_t> auxv;
+//        char **ptr = envp;
+//        while(ptr) ++ptr; ++ptr;
+//        auto *current = (Elf64_auxv_t*)ptr;
+//        while(current)
+//        {
+//            auxv.emplace_back(*current);
+//        }
+
+        //Allocate memory for the loader + the allocation info
+        std::string alloc_info = alloc_builder.build();
+        const auto payload_length = loader_len + alloc_info.size();
+        auto *loader_addr = (uint8_t*)mmap((uintptr_t*)0x500000000, payload_length,  PROT_READ | PROT_WRITE | PROT_EXEC, MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
         if(loader_addr == MAP_FAILED)
+        {
+            std::cout << "Failed to mmap loader: " << errno << std::endl;
             return EXIT_FAILURE;
+        }
+
+        //Check that loader address is in unused space
+        std::cout << "mmapping loader to: " << std::hex << (uintptr_t*)loader_addr << ". Length: " << std::dec << loader_len + alloc_info.size() << std::endl;
+        for(const auto &alloc : alloc_builder.allocations)
+        {
+            if(((uintptr_t)loader_addr >= alloc.addr && (uintptr_t)loader_addr < alloc.addr + alloc.len) ||
+               ((uintptr_t)loader_addr + payload_length >= alloc.addr && (uintptr_t)loader_addr + payload_length < alloc.addr + alloc.len) ||
+               (alloc.addr >= (uintptr_t)loader_addr && alloc.addr + alloc.len < (uintptr_t)loader_addr + payload_length) ||
+               (alloc.addr + alloc.len >= (uintptr_t)loader_addr && alloc.addr + alloc.len < (uintptr_t)loader_addr + payload_length))
+            {
+                std::cout << "Loader got mmapped into needed memory. " << (int)alloc.type << ", 0x" << std::hex << alloc.addr << ", " << std::dec << alloc.len << std::endl;
+                return EXIT_FAILURE;
+            }
+        }
 
         //Write the loader binary
         memcpy(loader_addr, loader, loader_len);
 
-        //Write alloc metadata
+        //Write alloc info
         memcpy(loader_addr + loader_len, alloc_info.data(), alloc_info.size());
 
-        //Get process memory allocations so we know where we can free up to (only free up until the stack, no more)
-        std::vector<Alloc> allocations = get_process_allocations(getpid());
-        uintptr_t stack_addr = std::find_if(allocations.begin(), allocations.end(), [](const Alloc &alloc) {
-            return alloc.type == Alloc::Type::stack;
-        })->addr;
-
-        //Figure out the address range to munmap. I cba doing this in asm, so do it here and pass it as arguments.
-        uint64_t free_begin_p1 = 0;
-        uint64_t free_len_p1 = round_up((uint64_t)loader_addr, page_size) - page_size;
-        uint64_t free_begin_p2 = round_up((uint64_t)loader_addr + loader_len, page_size);
-        uint64_t free_len_p2 = stack_addr - free_begin_p2;
-
         //Jump into the loader, we should not return from here
-        ((LoaderFunc)loader_addr)(free_begin_p1, free_len_p1, free_begin_p2, free_len_p2, loader_addr + loader_len, elf.header.program_entry_pos);
+        ((LoaderFunc)loader_addr)(loader_addr + loader_len, elf.header.program_entry_pos, (uint64_t)argv, argc);
         abort();
     }
 
@@ -129,11 +177,12 @@ bool ElfLoader::exec(Elf elf, int argc, char *argv[])
     for(auto &section : elf.program_headers)
     {
         //Only write sections marked as loadable
-        if(section.type != ElfProgramHeader::Type::load)
+        if(section.type == ElfProgramHeader::Type::dynamic)
+            std::cout << "Warn: Image contains dynamic sections!" << std::endl;
+        if(section.type != ElfProgramHeader::Type::load && section.type != ElfProgramHeader::Type::tls)
             continue;
 
         write_to_pid(pid, &elf.binary_data[section.file_offset], section.file_size, (void*)section.mem_offset, section.file_size);
-        std::cout << "Write program header " << section.mem_offset << ": " << section.file_size << std::endl;
     }
 
     //Sections are now written, resume the child
@@ -191,6 +240,7 @@ std::vector<ElfLoader::Alloc> ElfLoader::get_process_allocations(int pid)
         else if(type == "vvar") alloc.type = Alloc::Type::vvar;
         else if(type == "vdso") alloc.type = Alloc::Type::vdso;
         else if(type == "vsyscall") alloc.type = Alloc::Type::vsyscall;
+        else if(type == "heap") alloc.type = Alloc::Type::heap;
         allocations.emplace_back(alloc);
     }
 
@@ -205,8 +255,9 @@ void ElfLoader::write_to_pid(int pid, void *src_addr, size_t src_len, void *dest
     local_vec.iov_len = src_len;
     remote_vec.iov_base = dest_addr;
     remote_vec.iov_len = dest_len;
-    if(process_vm_writev(pid, &local_vec, 1, &remote_vec, 1, 0) != local_vec.iov_len)
+    ssize_t ret = process_vm_writev(pid, &local_vec, 1, &remote_vec, 1, 0);
+    if(ret != local_vec.iov_len)
     {
-        throw std::runtime_error("Failed to make remote write. Errno: " + std::to_string(errno));
+        throw std::runtime_error("Failed to make remote write. Bytes written: " + std::to_string(ret) + "/" + std::to_string(local_vec.iov_len) + ". Errno: " + std::to_string(errno));
     }
 }
